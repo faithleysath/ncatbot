@@ -71,85 +71,12 @@ class NcatBotApp:
     def is_running(self) -> bool:
         return self._running
 
-    def _is_framework_event(self, event_obj: object) -> bool:
-        return isinstance(event_obj, FrameworkEvent)
-
-    def _enqueue_framework_event(self, event: FrameworkEvent):
-        self._internal_adapter.publish_nowait(event)
-
-    def _emit_framework_event(self, event: FrameworkEvent):
-        if self._loop is None:
-            self._enqueue_framework_event(event)
-            return
-
-        try:
-            current_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            current_loop = None
-
-        if current_loop is self._loop:
-            self._enqueue_framework_event(event)
-        else:
-            self._loop.call_soon_threadsafe(self._enqueue_framework_event, event)
-
-    def _is_stop_requested(self) -> bool:
-        return self._stop_event is not None and self._stop_event.is_set()
-
-    def _should_observe_event(self, event_obj: object) -> bool:
-        return not self._is_framework_event(event_obj)
-
     def add_adapter(self, adapter: BaseAdapter):
         self._adapter_runtime.add_adapter(
             adapter,
             running=self._running,
             loop=self._loop,
         )
-
-    def _spawn_handler_task(
-        self,
-        handler: HandlerType,
-        event_obj: object,
-        *,
-        observe: bool,
-    ) -> None:
-        task = asyncio.create_task(self._run_handler(handler, event_obj, observe=observe))
-        self._handler_tasks.add(task)
-        task.add_done_callback(self._handler_tasks.discard)
-
-    async def _wait_for_handler_tasks(self) -> None:
-        while self._handler_tasks:
-            tasks = tuple(self._handler_tasks)
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    def _prepare_runtime(self) -> None:
-        """Initialize per-run state before adapters start producing events."""
-        self._running = True
-        self._loop = asyncio.get_running_loop()
-        self._stop_event = asyncio.Event()
-        self._handler_tasks = set()
-        self._event_broadcaster.reset()
-        self._adapter_runtime.prepare_runtime()
-
-    def _reset_runtime_state(self) -> None:
-        """Clear transient runtime state so the app can be started again."""
-        self._running = False
-        self._stop_event = None
-        self._loop = None
-        self._handler_tasks = set()
-        self._adapter_runtime.reset_runtime()
-
-    async def _shutdown_runtime(self) -> None:
-        """Stop adapters, drain handlers, and close event subscribers in order."""
-        try:
-            if self._running:
-                self._emit_framework_event(AppStopping())
-                await asyncio.sleep(0, result=None)
-
-            await self._adapter_runtime.cancel_tasks()
-            self._event_broadcaster.close()
-            await self._wait_for_handler_tasks()
-        finally:
-            self._reset_runtime_state()
 
     @overload
     def on_event[T](self, arg: type[T]) -> Callable[[EventHandler[T]], EventHandler[T]]: ...
@@ -228,6 +155,100 @@ class NcatBotApp:
             )
             raise
 
+    async def start(self):
+        if self._running:
+            raise RuntimeError("BotApp 已在运行中")
+
+        self._prepare_runtime()
+        self._emit_framework_event(AppStarting())
+
+        try:
+            self._adapter_runtime.start_all()
+            self._emit_framework_event(AppStarted())
+            stop_event = self._stop_event
+            assert stop_event is not None
+            await stop_event.wait()
+        finally:
+            await self._shutdown_runtime()
+
+    def stop(self):
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+    def run(self) -> None:
+        """Run the app in a fresh event loop."""
+        try:
+            asyncio.run(self.start())
+        except KeyboardInterrupt:
+            logger.info("收到 KeyboardInterrupt，正在停止应用")
+
+    def _prepare_runtime(self) -> None:
+        """Initialize per-run state before adapters start producing events."""
+        self._running = True
+        self._loop = asyncio.get_running_loop()
+        self._stop_event = asyncio.Event()
+        self._handler_tasks = set()
+        self._event_broadcaster.reset()
+        self._adapter_runtime.prepare_runtime()
+
+    async def _shutdown_runtime(self) -> None:
+        """Stop adapters, drain handlers, and close event subscribers in order."""
+        try:
+            if self._running:
+                self._emit_framework_event(AppStopping())
+                await asyncio.sleep(0, result=None)
+
+            await self._adapter_runtime.cancel_tasks()
+            self._event_broadcaster.close()
+            await self._wait_for_handler_tasks()
+        finally:
+            self._reset_runtime_state()
+
+    def _reset_runtime_state(self) -> None:
+        """Clear transient runtime state so the app can be started again."""
+        self._running = False
+        self._stop_event = None
+        self._loop = None
+        self._handler_tasks = set()
+        self._adapter_runtime.reset_runtime()
+
+    def _is_framework_event(self, event_obj: object) -> bool:
+        return isinstance(event_obj, FrameworkEvent)
+
+    def _emit_framework_event(self, event: FrameworkEvent):
+        if self._loop is None:
+            self._internal_adapter.publish_nowait(event)
+            return
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop is self._loop:
+            self._internal_adapter.publish_nowait(event)
+        else:
+            self._loop.call_soon_threadsafe(self._internal_adapter.publish_nowait, event)
+
+    def _is_stop_requested(self) -> bool:
+        return self._stop_event is not None and self._stop_event.is_set()
+
+    def _spawn_handler_task(
+        self,
+        handler: HandlerType,
+        event_obj: object,
+        *,
+        observe: bool,
+    ) -> None:
+        task = asyncio.create_task(self._run_handler(handler, event_obj, observe=observe))
+        self._handler_tasks.add(task)
+        task.add_done_callback(self._handler_tasks.discard)
+
+    async def _wait_for_handler_tasks(self) -> None:
+        while self._handler_tasks:
+            tasks = tuple(self._handler_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _run_handler(
         self,
         handler: HandlerType,
@@ -275,7 +296,7 @@ class NcatBotApp:
 
     async def _dispatch_event(self, event_obj: object, source_adapter: BaseAdapter):
         """分发事件给对应的 handler"""
-        observe = self._should_observe_event(event_obj)
+        observe = not isinstance(event_obj, FrameworkEvent)
         event_type = event_type_name(event_obj)
 
         if observe:
@@ -313,30 +334,3 @@ class NcatBotApp:
                     )
                 )
             self._spawn_handler_task(handler, event_obj, observe=observe)
-
-    async def start(self):
-        if self._running:
-            raise RuntimeError("BotApp 已在运行中")
-
-        self._prepare_runtime()
-        self._emit_framework_event(AppStarting())
-
-        try:
-            self._adapter_runtime.start_all()
-            self._emit_framework_event(AppStarted())
-            stop_event = self._stop_event
-            assert stop_event is not None
-            await stop_event.wait()
-        finally:
-            await self._shutdown_runtime()
-
-    def stop(self):
-        if self._stop_event is not None:
-            self._stop_event.set()
-
-    def run(self) -> None:
-        """Run the app in a fresh event loop."""
-        try:
-            asyncio.run(self.start())
-        except KeyboardInterrupt:
-            logger.info("收到 KeyboardInterrupt，正在停止应用")
