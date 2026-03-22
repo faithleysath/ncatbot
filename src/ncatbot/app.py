@@ -11,7 +11,7 @@ from ._internal.broadcaster import EventBroadcaster
 from ._internal.handlers import EventHandler, HandlerRegistry, HandlerType
 from ._internal.runtime import AdapterRuntime, adapter_event_kwargs
 from ._internal.support import callable_name, event_type_name
-from .adapters import BaseAdapter
+from .adapters import BaseAdapter, InternalEventAdapter
 from .events import (
     AppStarted,
     AppStarting,
@@ -47,6 +47,7 @@ class NcatBotApp:
         self._handler_tasks: set[asyncio.Task[None]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._waiter_ids = count(1)
+        self._internal_adapter = InternalEventAdapter()
         self._adapter_runtime = AdapterRuntime(
             adapter_restart_delay=adapter_restart_delay,
             dispatch_event=self._dispatch_event,
@@ -56,6 +57,7 @@ class NcatBotApp:
             logger=logger,
         )
         self.adapters = self._adapter_runtime.adapters
+        self.add_adapter(self._internal_adapter)
 
     def events(self) -> AsyncIterator[object]:
         """返回广播所有 adapter 事件的异步迭代器。"""
@@ -73,7 +75,7 @@ class NcatBotApp:
         return isinstance(event_obj, FrameworkEvent)
 
     def _enqueue_framework_event(self, event: FrameworkEvent):
-        self._adapter_runtime.internal_adapter.publish_nowait(event)
+        self._internal_adapter.publish_nowait(event)
 
     def _emit_framework_event(self, event: FrameworkEvent):
         if self._loop is None:
@@ -143,10 +145,9 @@ class NcatBotApp:
                 self._emit_framework_event(AppStopping())
                 await asyncio.sleep(0, result=None)
 
-            await self._adapter_runtime.cancel_tasks(include_internal=False)
+            await self._adapter_runtime.cancel_tasks()
             self._event_broadcaster.close()
             await self._wait_for_handler_tasks()
-            await self._adapter_runtime.cancel_tasks(include_internal=True)
         finally:
             self._reset_runtime_state()
 

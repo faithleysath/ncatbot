@@ -6,7 +6,14 @@ from typing import Any, Self, cast
 import pytest
 
 from ncatbot import NcatBotApp, WaitEventCancelledError
-from ncatbot.events import AppStarted, AppStarting, AppStopping
+from ncatbot.adapters import InternalEventAdapter
+from ncatbot.events import (
+    AdapterAdded,
+    AdapterRunStarting,
+    AppStarted,
+    AppStarting,
+    AppStopping,
+)
 
 
 def run_async[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -100,6 +107,12 @@ class QueueAdapter:
                 yield await self.queue.get()
 
         return iterator()
+
+
+def test_internal_adapter_is_registered_first() -> None:
+    app = NcatBotApp()
+
+    assert isinstance(app.adapters[0], InternalEventAdapter)
 
 
 def test_on_event_rejects_sync_handler_without_explicit_event_type() -> None:
@@ -362,5 +375,35 @@ def test_framework_lifecycle_events_are_published_on_event_stream() -> None:
         assert AppStopping in event_types
         assert event_types.index(AppStarting) < event_types.index(AppStarted)
         assert event_types.index(AppStarted) < event_types.index(AppStopping)
+
+    run_async(scenario())
+
+
+def test_internal_adapter_lifecycle_events_are_visible() -> None:
+    async def scenario() -> None:
+        app = NcatBotApp()
+        seen: list[object] = []
+
+        consumer = asyncio.create_task(collect_events(app, seen))
+        start_task = asyncio.create_task(app.start())
+        await asyncio.sleep(0.05)
+
+        app.stop()
+        await start_task
+        await consumer
+
+        internal = app.adapters[0]
+        assert any(
+            isinstance(event, AdapterAdded)
+            and event.adapter_name == internal.adapter_name
+            and event.platform_name == internal.platform_name
+            for event in seen
+        )
+        assert any(
+            isinstance(event, AdapterRunStarting)
+            and event.adapter_name == internal.adapter_name
+            and event.platform_name == internal.platform_name
+            for event in seen
+        )
 
     run_async(scenario())

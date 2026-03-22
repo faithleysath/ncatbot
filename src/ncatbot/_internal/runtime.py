@@ -3,7 +3,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Literal, TypedDict
 
-from ..adapters import BaseAdapter, InternalEventAdapter
+from ..adapters import BaseAdapter
 from ..events import (
     AdapterAdded,
     AdapterRestartScheduled,
@@ -54,15 +54,6 @@ class AdapterRuntime:
         self._is_running = is_running
         self._is_stop_requested = is_stop_requested
         self._logger = logger
-        self._internal_adapter = InternalEventAdapter()
-        self.attach(self._internal_adapter)
-
-    @property
-    def internal_adapter(self) -> InternalEventAdapter:
-        return self._internal_adapter
-
-    def is_internal_adapter(self, adapter: BaseAdapter) -> bool:
-        return adapter is self._internal_adapter
 
     def attach(self, adapter: BaseAdapter) -> None:
         """Register an adapter instance without starting it yet."""
@@ -85,8 +76,7 @@ class AdapterRuntime:
     ) -> None:
         """Attach an adapter and start it immediately when the app is already running."""
         self.attach(adapter)
-        if not self.is_internal_adapter(adapter):
-            self._emit_framework_event(AdapterAdded(**adapter_event_kwargs(adapter)))
+        self._emit_framework_event(AdapterAdded(**adapter_event_kwargs(adapter)))
 
         if running and loop is not None:
             try:
@@ -104,13 +94,9 @@ class AdapterRuntime:
         for adapter in self.adapters:
             self._spawn_adapter_task(adapter)
 
-    async def cancel_tasks(self, *, include_internal: bool) -> None:
-        """Cancel supervised adapter tasks, optionally keeping the internal adapter alive."""
-        tasks = tuple(
-            task
-            for adapter, task in self._adapter_tasks.items()
-            if include_internal or not self.is_internal_adapter(adapter)
-        )
+    async def cancel_tasks(self) -> None:
+        """Cancel all supervised adapter tasks."""
+        tasks = tuple(self._adapter_tasks.values())
         for task in tasks:
             task.cancel()
         if tasks:
@@ -126,13 +112,12 @@ class AdapterRuntime:
         attempt = 0
         while True:
             attempt += 1
-            if not self.is_internal_adapter(adapter):
-                self._emit_framework_event(
-                    AdapterRunStarting(
-                        **adapter_event_kwargs(adapter),
-                        attempt=attempt,
-                    )
+            self._emit_framework_event(
+                AdapterRunStarting(
+                    **adapter_event_kwargs(adapter),
+                    attempt=attempt,
                 )
+            )
 
             exit_reason: Literal["completed", "failed", "stopped"] = "completed"
             try:
@@ -143,39 +128,36 @@ class AdapterRuntime:
                 raise
             except Exception as exc:
                 exit_reason = "failed"
-                if not self.is_internal_adapter(adapter):
-                    self._emit_framework_event(
-                        AdapterRunFailed(
-                            **adapter_event_kwargs(adapter),
-                            attempt=attempt,
-                            exception=exc,
-                        )
+                self._emit_framework_event(
+                    AdapterRunFailed(
+                        **adapter_event_kwargs(adapter),
+                        attempt=attempt,
+                        exception=exc,
                     )
+                )
                 self._logger.exception("Adapter %s 发生错误", adapter.adapter_name)
 
             if self._is_stop_requested():
                 exit_reason = "stopped"
 
-            if not self.is_internal_adapter(adapter):
-                self._emit_framework_event(
-                    AdapterRunExited(
-                        **adapter_event_kwargs(adapter),
-                        attempt=attempt,
-                        reason=exit_reason,
-                    )
+            self._emit_framework_event(
+                AdapterRunExited(
+                    **adapter_event_kwargs(adapter),
+                    attempt=attempt,
+                    reason=exit_reason,
                 )
+            )
 
             if not self._is_running() or self._is_stop_requested():
                 return
 
-            if not self.is_internal_adapter(adapter):
-                self._emit_framework_event(
-                    AdapterRestartScheduled(
-                        **adapter_event_kwargs(adapter),
-                        attempt=attempt,
-                        delay=self._adapter_restart_delay,
-                    )
+            self._emit_framework_event(
+                AdapterRestartScheduled(
+                    **adapter_event_kwargs(adapter),
+                    attempt=attempt,
+                    delay=self._adapter_restart_delay,
                 )
+            )
             self._logger.warning(
                 "Adapter %s 已退出，%.2f 秒后重试",
                 adapter.adapter_name,

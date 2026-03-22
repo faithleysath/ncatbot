@@ -160,7 +160,12 @@ adapter 是平台接入层，也是这个框架最核心的扩展点。一个 ad
 当前仓库内置：
 
 - `NapCatAdapter`: 对 NapCat 的封装，直接继承 `napcat.NapCatClient`
-- `InternalEventAdapter`: 框架内部使用，用来发布框架事件
+- `InternalEventAdapter`: 由 `NcatBotApp` 自动注册的第一个 adapter，用来发布框架事件；它和其他 adapter 一样参与统一事件流与生命周期管理
+
+补充说明：
+
+- `NcatBotApp` 初始化时会先自动挂上 `InternalEventAdapter`
+- 所以 `events()` 或 `async for event in app` 看到的事件流里，天然同时包含业务事件和框架事件
 
 ### 3. 事件处理函数
 
