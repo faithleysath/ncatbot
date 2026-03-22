@@ -6,6 +6,7 @@ from typing import Any, Self, cast
 import pytest
 
 from ncatbot import NcatBotApp, WaitEventCancelledError
+from ncatbot._internal.broadcaster import EventBroadcaster
 from ncatbot.adapters import InternalEventAdapter
 from ncatbot.events import (
     AdapterAdded,
@@ -113,6 +114,32 @@ def test_internal_adapter_is_registered_first() -> None:
     app = NcatBotApp()
 
     assert isinstance(app.adapters[0], InternalEventAdapter)
+
+
+def test_event_broadcaster_async_iteration_creates_fresh_subscriptions() -> None:
+    async def scenario() -> None:
+        broadcaster = EventBroadcaster[object]()
+        seen_a: list[object] = []
+        seen_b: list[object] = []
+        event = object()
+
+        async def consume(sink: list[object]) -> None:
+            async for item in broadcaster:
+                sink.append(item)
+
+        consumer_a = asyncio.create_task(consume(seen_a))
+        consumer_b = asyncio.create_task(consume(seen_b))
+        await asyncio.sleep(0)
+
+        broadcaster.publish(event)
+        broadcaster.close()
+
+        await asyncio.gather(consumer_a, consumer_b)
+
+        assert seen_a == [event]
+        assert seen_b == [event]
+
+    run_async(scenario())
 
 
 def test_on_event_rejects_sync_handler_without_explicit_event_type() -> None:

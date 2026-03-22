@@ -11,6 +11,10 @@ class EventBroadcaster[T]:
         self._closed_sentinel = object()
         self._subscribers: list[asyncio.Queue[T | object]] = []
 
+    def __aiter__(self) -> AsyncIterator[T]:
+        """Allow `async for item in broadcaster` as shorthand for `subscribe()`."""
+        return self.subscribe()
+
     def subscribe(self) -> AsyncIterator[T]:
         """Create a new async iterator over future published items."""
         queue: asyncio.Queue[T | object] = asyncio.Queue()
